@@ -1,0 +1,356 @@
+import sys
+import pandas as pd
+import pyperclip
+from PyQt5.QtWidgets import QApplication, QMainWindow, QListWidget, QPlainTextEdit, QVBoxLayout, QWidget, QHBoxLayout, \
+    QAbstractItemView, QFrame,QLineEdit,QPushButton,QLabel,QRadioButton,QCheckBox,QMessageBox,QAction,QMenu,QListWidget,QDialog
+from PyQt5.QtGui import QTextCursor, QColor, QPainter, QFont
+from PyQt5.QtCore import Qt, QRect, QSize,QTimer
+from difflib import ndiff
+import time
+
+
+class LineNumberArea(QWidget):
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.code_editor = editor
+
+    def sizeHint(self):
+        return QSize(self.code_editor.line_number_area_width(), 0)
+
+    def paintEvent(self, event):
+        self.code_editor.line_number_area_paint_event(event)
+
+
+class LinedPlainTextEdit(QPlainTextEdit):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.line_number_area = LineNumberArea(self)
+        self.updateRequest.connect(self.update_line_number_area)
+        self.blockCountChanged.connect(self.update_line_number_area_width)
+        self.cursorPositionChanged.connect(self.highlight_current_line)
+
+        self.update_line_number_area_width(0)
+
+    def line_number_area_width(self):
+        digits = len(str(max(1, self.blockCount())))
+        space = 3 + self.fontMetrics().horizontalAdvance('9') * digits
+        return space
+
+    def update_line_number_area_width(self, _):
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+
+    def update_line_number_area(self, rect, dy):
+        if dy:
+            self.line_number_area.scroll(0, dy)
+        else:
+            self.line_number_area.update(0, rect.y(), self.line_number_area.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self.update_line_number_area_width(0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height()))
+
+    def line_number_area_paint_event(self, event):
+        painter = QPainter(self.line_number_area)
+        painter.fillRect(event.rect(), Qt.lightGray)
+
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+        bottom = top + self.blockBoundingRect(block).height()
+        height = self.fontMetrics().height()
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(block_number + 1)
+                painter.setPen(Qt.black)
+                painter.drawText(0, top, self.line_number_area.width(), height, Qt.AlignRight, number)
+
+            block = block.next()
+            top = bottom
+            bottom = top + self.blockBoundingRect(block).height()
+            block_number += 1
+
+    def highlight_current_line(self):
+        extra_selections = []
+
+        if not self.isReadOnly():
+            selection = QTextEdit.ExtraSelection()
+            line_color = QColor(Qt.yellow).lighter(160)
+            selection.format.setBackground(line_color)
+            selection.format.setProperty(QTextFormat.FullWidthSelection, True)
+            selection.cursor = self.textCursor()
+            selection.cursor.clearSelection()
+            extra_selections.append(selection)
+
+        self.setExtraSelections(extra_selections)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, data):
+        super().__init__()
+        self.data = data
+
+        self.setWindowTitle('对比数据主题和虚拟化的sql')
+        self.setGeometry(100, 100, 800, 600)
+
+        # 查询
+        self.subject_path=QLabel('数据主题路径:')
+        self.line_edit = QLineEdit(self)
+        self.difftime=QLabel('修改时间大于创建时间:')
+        self.difftime_check_box=QCheckBox(self)
+        self.repetition_ratio = QLabel('重复比例>')
+        self.repetition_ratio_edit = QLineEdit(self)
+        self.repetition_ratio_edit.setMaximumWidth(25)
+        self.creation_by = QLabel('创建人工号:')
+        self.creation_by_edit = QLineEdit(self)
+        self.creation_by_edit.setMaximumWidth(80)
+
+        self.button = QPushButton('查询', self)
+
+        #列表
+        self.list_widget = QListWidget()
+        self.list_widget_rdv=QListWidget()
+        self.list_widget.setMaximumHeight(200)
+        self.list_widget_rdv.setMaximumHeight(200)
+
+
+        #列表布局
+        layout_query_list = QHBoxLayout()
+        layout_query_list.setSpacing(0)
+        layout_query_list.addWidget(self.list_widget)
+        layout_query_list.addWidget(self.list_widget_rdv)
+
+        # 对比框框
+        self.old_sql_edit = LinedPlainTextEdit()
+        self.new_sql_edit = LinedPlainTextEdit()
+
+        self.old_sql_edit.setReadOnly(True)
+        self.new_sql_edit.setReadOnly(True)
+
+        self.on_button_clicked()
+
+        #设置列表
+        self.list_widget.currentItemChanged.connect(self.display_sql)
+        self.list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
+        self.list_widget_rdv.setStyleSheet("""  
+            QListWidget::item:selected {  
+                background-color: transparent; /* 设置为透明背景 */  
+                border: none; /* 移除边框 */  
+            }  
+        """)
+
+        self.list_widget_rdv.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_widget_rdv.itemDoubleClicked.connect(self.on_item_double_clicked)
+
+        # 同时滚动
+        self.old_sql_edit.verticalScrollBar().valueChanged.connect(
+            self.sync_scrollbars(self.new_sql_edit.verticalScrollBar())
+        )
+        self.new_sql_edit.verticalScrollBar().valueChanged.connect(
+            self.sync_scrollbars(self.old_sql_edit.verticalScrollBar())
+        )
+
+        self.list_widget.verticalScrollBar().valueChanged.connect(
+            self.sync_scrollbars(self.list_widget_rdv.verticalScrollBar())
+        )
+        self.list_widget_rdv.verticalScrollBar().valueChanged.connect(
+            self.sync_scrollbars(self.list_widget.verticalScrollBar())
+        )
+        layout_query = QHBoxLayout()
+        layout_query.addWidget(self.subject_path)
+        layout_query.addWidget(self.line_edit)
+        layout_query.addWidget(self.difftime)
+        layout_query.addWidget(self.difftime_check_box)
+        layout_query.addWidget(self.repetition_ratio)
+        layout_query.addWidget(self.repetition_ratio_edit)
+        layout_query.addWidget(self.creation_by)
+        layout_query.addWidget(self.creation_by_edit)
+        layout_query.addWidget(self.button)
+        #对比框布局
+        layout = QHBoxLayout()
+        layout.setSpacing(0)
+        layout.addWidget(self.old_sql_edit)
+        layout.addWidget(self.new_sql_edit)
+        #文字
+        layout_title = QHBoxLayout()
+        subject=QLabel("ROMA数据主题路径⬆目前数据主题转换为虚拟化的sql⬇(双击路径复制)")
+        rdv=QLabel("ROMA数据虚拟化路径⬆虚拟化迁移时的sql⬇(右键复制更多)")
+        layout_title.addWidget(subject)
+        layout_title.addWidget(rdv)
+
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(layout_query)
+        main_layout.addLayout(layout_query_list)
+        main_layout.addLayout(layout_title)
+        main_layout.addLayout(layout)
+
+        container = QWidget()
+        container.setLayout(main_layout)
+        # 为按钮设置槽函数
+        self.button.clicked.connect(self.on_button_clicked)
+        self.setCentralWidget(container)
+    def contextMenuEvent(self, event):
+        # 创建上下文菜单
+        menu = QMenu(self.list_widget)
+
+        # 添加复制动作
+        copy_action = QAction( menu)
+        copy_action.setText(f'复制路径 {self.list_widget.selectedItems()[0].text()} 数据主题sql')
+
+        copy_action2 = QAction(menu)
+        copy_action2.setText(f'复制路径 {self.list_widget.selectedItems()[0].text()} 虚拟化路径')
+
+        copy_action.triggered.connect(self.on_copy_sql)
+        copy_action2.triggered.connect(self.on_copy_subject_name)
+
+        menu.addAction(copy_action)
+        menu.addAction(copy_action2)
+
+        # 显示上下文菜单
+        menu.exec_(event.globalPos())
+
+    def on_copy_subject_name(self):
+        # 获取当前选中的项目
+        name = self.list_widget.selectedItems()
+        selected_items = self.data.loc[self.data['name'] == name[0].text(), 'newname']
+        pyperclip.copy(str(selected_items.item()))
+        self.info_box(str(selected_items.item()))
+    def on_copy_sql(self):
+        # 获取当前选中的项目
+        name= self.list_widget.selectedItems()
+        selected_items=self.data.loc[self.data['name']==name[0].text(),'oldsql']
+        pyperclip.copy(str(selected_items.item()))
+        self.info_box()
+    def info_box(self,item=None):
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("信息")
+        msg_box.setText(f"{'' if item is None else item}成功复制到粘贴板")
+        msg_box.setIcon(QMessageBox.Information)
+        # 创建一个 QTimer 实例
+        timer = QTimer()
+        timer.setSingleShot(True)  # 设置定时器为单次触发
+        # 当定时器超时时，关闭消息框
+        def on_timeout():
+            msg_box.close()
+            # 连接定时器的 timeout() 信号到槽函数 on_timeout
+
+        timer.timeout.connect(on_timeout)
+        # 启动定时器，设置 1000 毫秒（即 1 秒）后触发
+        timer.start(200000)
+        msg_box.exec_()
+
+    def on_item_double_clicked(self, item):
+        # 当项被双击时，将该项的文本复制到剪贴板
+        pyperclip.copy(item.text())
+        msg_box = QMessageBox()
+        msg_box.setWindowTitle("信息")
+        msg_box.setText(f"{item.text()}成功复制到粘贴板")
+        msg_box.setIcon(QMessageBox.Information)
+        # 创建一个 QTimer 实例
+        timer = QTimer()
+        timer.setSingleShot(True)  # 设置定时器为单次触发
+        # 当定时器超时时，关闭消息框
+        def on_timeout():
+            msg_box.close()
+            # 连接定时器的 timeout() 信号到槽函数 on_timeout
+        timer.timeout.connect(on_timeout)
+        # 启动定时器，设置 1000 毫秒（即 1 秒）后触发
+        timer.start(2000)
+        msg_box.exec_()
+    def on_button_clicked(self):
+        # 获取输入框的值
+        #路径
+        text = self.line_edit.text()
+        #是否大于创建时间
+        state=self.difftime_check_box.isChecked()
+        #重复率
+        repetition_ratio=self.repetition_ratio_edit.text()
+        #创建人
+        creation_by=self.creation_by_edit.text()
+        self.data['flag'] = self.data['starttime'] < df['endtime']
+        self.data['flag'] = self.data['flag'].astype(str)
+        filters = pd.DataFrame()
+        if text:
+            filters['name'] = self.data['name'].str.contains(text,  na=False)  # case=False表示不区分大小写
+        if state:
+            filters['starttime'] = self.data['flag'] == str(state)
+        if repetition_ratio:
+            filters['num'] = self.data['num'] > int(repetition_ratio)
+        if creation_by:
+            filters['id'] = self.data['id'] == creation_by
+        filters['fi'] = filters.all(axis=1)
+        filters['fi'] = filters['fi'].astype(str)
+        self.list_widget.clear()
+        self.list_widget_rdv.clear()
+        if filters.size==0:
+            for index, row in self.data.iterrows():
+                self.list_widget.addItem(row['name'])
+                self.list_widget_rdv.addItem(row['newname'])
+        else:
+            filter_info = self.data.loc[filters['fi'] == 'True']
+            for index, row in filter_info.iterrows():
+                self.list_widget.addItem(row['name'])
+                self.list_widget_rdv.addItem(row['newname'])
+
+    def sync_scrollbars(self, other_scrollbar):
+        def on_value_changed(value):
+            other_scrollbar.setValue(value)
+
+        return on_value_changed
+
+    def display_sql(self, current, previous):
+        if current is not None:
+            name = current.text()
+            row = self.data[self.data['name'] == name].iloc[0]
+            old_sql = row['oldsql']
+            new_sql = row['newsql']
+
+            self.highlight_differences(old_sql, new_sql)
+
+    def highlight_differences(self, old_sql, new_sql):
+        old_lines = old_sql.splitlines()
+        new_lines = new_sql.splitlines()
+        diff = list(ndiff(old_lines, new_lines))
+        old_highlighted = []
+        new_highlighted = []
+
+        for line in diff:
+            if line.startswith('  '):
+                old_highlighted.append((line[2:], QColor('white')))
+                new_highlighted.append((line[2:], QColor('white')))
+            elif line.startswith('- '):
+                old_highlighted.append((line[2:], QColor('red')))
+                new_highlighted.append(('', QColor('red')))
+            elif line.startswith('+ '):
+                old_highlighted.append(('', QColor('green')))
+                new_highlighted.append((line[2:], QColor('green')))
+        self.old_sql_edit.clear()
+        self.new_sql_edit.clear()
+
+        for old_line, color in old_highlighted:
+            self.insert_highlighted_text(self.old_sql_edit, old_line, color)
+
+        for new_line, color in new_highlighted:
+            self.insert_highlighted_text(self.new_sql_edit, new_line, color)
+
+    def insert_highlighted_text(self, text_edit, text, color):
+        cursor = text_edit.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        fmt = cursor.charFormat()
+        if color is not None:
+            fmt.setForeground(color)
+        cursor.setCharFormat(fmt)
+        cursor.insertText(text + '\n')
+
+
+if __name__ == '__main__':
+    df = pd.read_excel('data.xlsx')
+    # time.sleep(120)
+    app = QApplication(sys.argv)
+    window = MainWindow(df)
+    window.show()
+    sys.exit(app.exec_())
