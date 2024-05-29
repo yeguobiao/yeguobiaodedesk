@@ -288,8 +288,8 @@ class MainWindow(QMainWindow):
         self.list_widget_rdv.clear()
         if filters.size==0:
             for index, row in self.data.iterrows():
-                self.list_widget.addItem(row['name'])
-                self.list_widget_rdv.addItem(row['newname'])
+                self.list_widget.addItem(str(row['name']))
+                self.list_widget_rdv.addItem(str(row['newname']))
         else:
             filter_info = self.data.loc[filters['fi'] == 'True']
             for index, row in filter_info.iterrows():
@@ -314,13 +314,19 @@ class MainWindow(QMainWindow):
     def highlight_differences(self, old_sql, new_sql):
         old_lines = old_sql.splitlines()
         new_lines = new_sql.splitlines()
+
+        max_lines = max(len(old_lines), len(new_lines))
+        old_lines.extend([''] * (max_lines - len(old_lines)))
+        new_lines.extend([''] * (max_lines - len(new_lines)))
+
         old_highlighted = []
         new_highlighted = []
 
         for old_line, new_line in zip(old_lines, new_lines):
-            diff = list(ndiff(old_line, new_line))
             old_line_highlighted = []
             new_line_highlighted = []
+
+            diff = list(ndiff(old_line, new_line))
 
             for char in diff:
                 if char.startswith('  '):
